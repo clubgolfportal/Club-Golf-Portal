@@ -195,10 +195,10 @@
   .countdown-banner{
     display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
     background:var(--accent-soft); border:1px solid var(--border); border-radius:var(--radius);
-    padding:10px 14px; margin-bottom:16px; font-size:12.5px;
+    padding:14px 18px; margin-bottom:16px; font-size:12.5px;
   }
   .countdown-label{color:var(--ink-muted); font-weight:500;}
-  .countdown-value{font-family:var(--mono); font-weight:600; color:var(--accent); font-size:12.5px;}
+  .countdown-value{font-family:var(--mono); font-weight:700; color:var(--accent); font-size:22px;}
 
   .warning-banner{
     background:var(--danger-soft); border:1px solid var(--danger); color:var(--danger);
@@ -380,6 +380,15 @@
       <div class="quick-add-row" id="quickAddRow"></div>
 
       <div class="section-label">Upcoming tee sheets</div>
+      <div class="panel create-panel hidden" id="bulkActionBar">
+        <div class="control-label" id="bulkSelectedLabel">0 selected</div>
+        <div class="create-form">
+          <div class="field"><label>Set sign-ups open at</label><input type="datetime-local" class="input" id="bulkPostAtInput"></div>
+          <button class="btn btn-primary btn-sm" id="bulkApplyBtn">Apply to selected</button>
+          <button class="btn btn-ghost btn-sm" id="bulkClearBtn">Clear selection</button>
+        </div>
+        <div class="msg" id="bulkMsg"></div>
+      </div>
       <div id="adminUpcoming"></div>
       <div class="section-label">Past tee sheets</div>
       <div id="adminPast"></div>
@@ -467,6 +476,7 @@ let viewMode = "admin"; // admin | member — only meaningful when isAdmin is tr
 let teeDates = {};           // dateId -> {enabled, foursomeCount, foursomeTimes, foursomeTimeHistory}
 let signupsByDate = {};      // dateId -> { slotKey: {name,uid,attended,docId} }
 let groundRulesText = "";    // broadcast message shown on every tee sheet
+let selectedDates = new Set(); // dateIds selected in the admin panel for bulk actions
 
 function escapeHtml(str){ const d=document.createElement("div"); d.textContent=str; return d.innerHTML; }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
@@ -477,6 +487,18 @@ function formatDateParts(dateId){
     day: String(d.getDate()).padStart(2,'0'),
     weekday: d.toLocaleString('en-US',{weekday:'long'})
   };
+}
+
+// Converts a JS Date to the value a <input type="datetime-local"> expects, in local time.
+function toDatetimeLocalValue(date){
+  if (!date) return "";
+  const pad = n => String(n).padStart(2,"0");
+  return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function parseDatetimeLocalValue(str){
+  if (!str) return null;
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 /* ---------------- POSTING COUNTDOWN (Wednesdays at 9:00 AM) ---------------- */
@@ -539,7 +561,7 @@ function autoEnableAndWarnCheck(){
   Object.keys(teeDates).forEach(id => {
     if (id < today) return;
     const d = teeDates[id];
-    if (!d.enabled && now >= getPostTimeForDate(id)){
+    if (!d.enabled && d.postAt && now >= d.postAt){
       db.collection("teeDates").doc(id).update({ enabled: true }).catch(() => {});
     }
   });
@@ -556,12 +578,14 @@ function autoEnableAndWarnCheck(){
 setInterval(autoEnableAndWarnCheck, 60000);
 
 // Normalizes a teeDates doc (handles legacy docs that only had a single `time` field).
-function normalizeTeeDate(data){
+function normalizeTeeDate(data, id){
   const foursomeCount = data.foursomeCount || DEFAULT_FOURSOME_COUNT;
   const fallback = (data.foursomeTimes && data.foursomeTimes[0]) || data.time || "3:00 PM";
   let foursomeTimes = Array.isArray(data.foursomeTimes) ? data.foursomeTimes.slice() : [];
   while (foursomeTimes.length < foursomeCount) foursomeTimes.push(fallback);
   foursomeTimes = foursomeTimes.slice(0, foursomeCount);
+  // Legacy docs saved before per-sheet scheduling existed fall back to the old Wednesday-9am rule.
+  const postAt = (data.postAt && data.postAt.toDate) ? data.postAt.toDate() : (id ? getPostTimeForDate(id) : null);
   return {
     enabled: !!data.enabled,
     foursomeCount,
@@ -569,7 +593,8 @@ function normalizeTeeDate(data){
     foursomeTimeHistory: data.foursomeTimeHistory || {},
     practiceStart: data.practiceStart || fallback,
     practiceEnd: data.practiceEnd || "6:00 PM",
-    checkinCode: data.checkinCode || ""
+    checkinCode: data.checkinCode || "",
+    postAt
   };
 }
 
@@ -713,7 +738,7 @@ function startListeners(){
 
   db.collection("teeDates").onSnapshot(snap => {
     teeDates = {};
-    snap.forEach(doc => teeDates[doc.id] = normalizeTeeDate(doc.data()));
+    snap.forEach(doc => teeDates[doc.id] = normalizeTeeDate(doc.data(), doc.id));
     renderAll();
     autoEnableAndWarnCheck();
   });
@@ -776,6 +801,31 @@ function createTeeSheet(dateId, foursomeCount, practiceStart, practiceEnd, msgEl
   });
 }
 
+document.getElementById("bulkApplyBtn").onclick = () => {
+  const input = document.getElementById("bulkPostAtInput");
+  const msg = document.getElementById("bulkMsg");
+  msg.className = "msg"; msg.textContent = "";
+  const dt = parseDatetimeLocalValue(input.value);
+  if (!dt){ msg.textContent = "Pick a date and time."; msg.classList.add("err"); return; }
+  if (!selectedDates.size){ msg.textContent = "No tee sheets selected."; msg.classList.add("err"); return; }
+  const batch = db.batch();
+  selectedDates.forEach(id => {
+    batch.update(db.collection("teeDates").doc(id), { postAt: firebase.firestore.Timestamp.fromDate(dt) });
+  });
+  batch.commit()
+    .then(() => {
+      msg.textContent = "Activation time updated for selected tee sheets.";
+      msg.classList.add("ok");
+      selectedDates.clear();
+      renderAll();
+    })
+    .catch(err => { msg.textContent = err.message; msg.classList.add("err"); });
+};
+document.getElementById("bulkClearBtn").onclick = () => {
+  selectedDates.clear();
+  renderAll();
+};
+
 function renderQuickAdd(){
   const row = document.getElementById("quickAddRow");
   const notYetAdded = KNOWN_SCHEDULE.filter(k => !teeDates[k.id]);
@@ -800,12 +850,29 @@ function renderAll(){
   }
 }
 
+function renderBulkBar(){
+  const bar = document.getElementById("bulkActionBar");
+  if (!bar) return;
+  const today = todayStr();
+  Array.from(selectedDates).forEach(id => {
+    if (!teeDates[id] || id < today) selectedDates.delete(id);
+  });
+  if (!selectedDates.size){
+    bar.classList.add("hidden");
+    return;
+  }
+  bar.classList.remove("hidden");
+  document.getElementById("bulkSelectedLabel").textContent =
+    `${selectedDates.size} tee sheet${selectedDates.size > 1 ? "s" : ""} selected`;
+}
+
 function renderAdminLists(){
   const today = todayStr();
   const upcomingEl = document.getElementById("adminUpcoming");
   const pastEl = document.getElementById("adminPast");
   upcomingEl.innerHTML = "";
   pastEl.innerHTML = "";
+  renderBulkBar();
 
   const ids = Object.keys(teeDates).sort();
   const upcoming = ids.filter(id => id >= today);
@@ -836,7 +903,7 @@ function renderStudentCard(){
 
 function buildDateCard(dateId, data, opts){
   const { adminMode, isPast } = opts;
-  const { enabled, foursomeCount, foursomeTimes, foursomeTimeHistory, practiceStart, practiceEnd, checkinCode } = data;
+  const { enabled, foursomeCount, foursomeTimes, foursomeTimeHistory, practiceStart, practiceEnd, checkinCode, postAt } = data;
   const slots = signupsByDate[dateId] || {};
   const { month, day, weekday } = formatDateParts(dateId);
   const slotKeys = buildSlotKeys(foursomeCount);
@@ -850,10 +917,22 @@ function buildDateCard(dateId, data, opts){
   if (isPast) statusHtml = '<span class="status status-muted">Past</span>';
   else if (adminMode) statusHtml = enabled ? '<span class="status status-live">Visible to members</span>' : '<span class="status status-off">Hidden</span>';
 
+  let selectHtml = "";
+  if (adminMode && !isPast){
+    selectHtml = `<label class="control-check" style="margin-bottom:4px;">
+      <input type="checkbox" class="bulk-select-chk" data-date="${dateId}" ${selectedDates.has(dateId) ? "checked":""}>
+      Select
+    </label>`;
+  }
+
   let controlsHtml = "";
   if (adminMode){
     controlsHtml = `
       <div class="panel-controls">
+        <div class="control-group">
+          <span class="control-label">Sign-ups open at</span>
+          <input type="datetime-local" class="input input-sm" id="postat-${dateId}" value="${toDatetimeLocalValue(postAt)}">
+        </div>
         <div class="control-group">
           <span class="control-label">Practice window</span>
           <div class="control-row">
@@ -938,6 +1017,7 @@ function buildDateCard(dateId, data, opts){
         <div class="panel-meta">${foursomeCount} foursome${foursomeCount>1?"s":""} · starts ${escapeHtml(earliestTime)}</div>
       </div>
       <div class="header-right">
+        ${selectHtml}
         <div class="practice-badge">
           <span class="practice-label">Practice</span>
           <span class="practice-time">${escapeHtml(practiceStart)} – ${escapeHtml(practiceEnd)}</span>
@@ -977,11 +1057,23 @@ function buildDateCard(dateId, data, opts){
   const saveSheetBtn = div.querySelector(".save-sheet-btn");
   if (saveSheetBtn) saveSheetBtn.onclick = () => saveSheetChanges(dateId, foursomeCount, foursomeTimes, foursomeTimeHistory);
   const enableChk = div.querySelector(`#enable-${dateId}`);
-  if (enableChk) enableChk.onchange = () => db.collection("teeDates").doc(dateId).update({ enabled: enableChk.checked });
+  if (enableChk) enableChk.onchange = () => {
+    const desired = enableChk.checked;
+    db.collection("teeDates").doc(dateId).update({ enabled: desired })
+      .catch(err => {
+        enableChk.checked = !desired;
+        alert("Could not update visibility: " + err.message);
+      });
+  };
   const pdfBtn = div.querySelector(".pdf-btn");
   if (pdfBtn) pdfBtn.onclick = () => downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTimes, slots, practiceStart, practiceEnd);
   const deleteBtn = div.querySelector(".delete-sheet-btn");
   if (deleteBtn) deleteBtn.onclick = () => deleteTeeSheet(dateId);
+  const bulkChk = div.querySelector(".bulk-select-chk");
+  if (bulkChk) bulkChk.onchange = () => {
+    if (bulkChk.checked) selectedDates.add(dateId); else selectedDates.delete(dateId);
+    renderBulkBar();
+  };
 
   return div;
 }
@@ -1079,7 +1171,13 @@ function saveSheetChanges(dateId, oldCount, oldTimes, oldHistory){
   const practiceEnd = document.getElementById(`pend-${dateId}`).value.trim() || "6:00 PM";
   const checkinInput = document.getElementById(`checkincode-${dateId}`);
   const checkinCode = checkinInput ? checkinInput.value.trim() : "";
-  const applyUpdate = () => ref.set({ foursomeCount: newCount, foursomeTimes: newTimes, foursomeTimeHistory: newHistory, practiceStart, practiceEnd, checkinCode }, { merge:true });
+  const postAtInput = document.getElementById(`postat-${dateId}`);
+  const postAtDate = postAtInput ? parseDatetimeLocalValue(postAtInput.value) : null;
+  const applyUpdate = () => {
+    const payload = { foursomeCount: newCount, foursomeTimes: newTimes, foursomeTimeHistory: newHistory, practiceStart, practiceEnd, checkinCode };
+    if (postAtDate) payload.postAt = firebase.firestore.Timestamp.fromDate(postAtDate);
+    return ref.set(payload, { merge:true });
+  };
 
   if (newCount < oldCount){
     db.collection("signups").where("dateId","==",dateId).get().then(snap => {
