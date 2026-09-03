@@ -205,9 +205,17 @@
     display:flex; align-items:center; gap:6px;
   }
   .countdown-label::before{content:"⏱"; font-size:13px;}
-  .countdown-value{
+  .countdown-value{display:flex; align-items:baseline; gap:12px;}
+  .countdown-unit{display:flex; align-items:baseline; gap:2px;}
+  .countdown-num{
     font-family:var(--mono); font-weight:700; color:#fff; font-size:26px;
     letter-spacing:.01em; text-shadow:0 1px 3px rgba(0,0,0,.2);
+  }
+  .countdown-suffix{
+    font-family:var(--mono); font-weight:600; color:rgba(255,255,255,.65); font-size:12px;
+  }
+  .countdown-now{
+    font-family:var(--mono); font-weight:700; color:#fff; font-size:22px;
   }
 
   .warning-banner{
@@ -292,7 +300,8 @@
 
   @media (max-width:560px){
     .countdown-banner{flex-direction:column; align-items:flex-start;}
-    .countdown-value{font-size:22px;}
+    .countdown-value{gap:8px;}
+    .countdown-num{font-size:22px;}
     .panel-header{flex-direction:column;}
     .panel-controls{flex-direction:column; align-items:stretch;}
     .roster-row{align-items:flex-start;}
@@ -525,24 +534,26 @@ function getNextPostTime(){
 }
 
 function formatCountdown(msLeft){
-  if (msLeft <= 0) return "Posting now";
+  if (msLeft <= 0) return '<span class="countdown-now">Posting now</span>';
   const totalSeconds = Math.floor(msLeft / 1000);
   const d = Math.floor(totalSeconds / 86400);
   const h = Math.floor((totalSeconds % 86400) / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
-  return `${d}d ${h}h ${m}m ${s}s`;
+  const units = [ [d,"d"], [h,"h"], [m,"m"], [s,"s"] ];
+  return units.map(([val,label]) =>
+    `<span class="countdown-unit"><span class="countdown-num">${String(val).padStart(2,"0")}</span><span class="countdown-suffix">${label}</span></span>`
+  ).join("");
 }
 
 function updateCountdowns(){
   const target = getNextPostTime();
   const msLeft = target - new Date();
-  const dateLabel = target.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
-  const text = `${formatCountdown(msLeft)} · ${dateLabel} at 9:00 AM`;
+  const html = formatCountdown(msLeft);
   const s = document.getElementById("studentCountdownValue");
-  if (s) s.textContent = text;
+  if (s) s.innerHTML = html;
   const a = document.getElementById("adminCountdownValue");
-  if (a) a.textContent = text;
+  if (a) a.innerHTML = html;
 }
 updateCountdowns();
 setInterval(updateCountdowns, 1000);
