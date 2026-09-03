@@ -1159,10 +1159,10 @@ function openClaimConfirm(btn, dateId, slotKey){
   const yesBtn = box.querySelector(".yes");
   chk.onchange = () => yesBtn.disabled = !chk.checked;
   box.querySelector(".no").onclick = () => box.remove();
-  yesBtn.onclick = () => claimSlot(dateId, slotKey, box);
+  yesBtn.onclick = (e) => claimSlot(dateId, slotKey, box, e.clientX, e.clientY);
 }
 
-function claimSlot(dateId, slotKey, box){
+function claimSlot(dateId, slotKey, box, clickX, clickY){
   const docId = `${dateId}_${slotKey}`;
   db.collection("signups").doc(docId).set({
     dateId, slotKey,
@@ -1172,8 +1172,13 @@ function claimSlot(dateId, slotKey, box){
     attended: null,
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
   }).then(() => {
-    const rect = box.getBoundingClientRect();
-    spawnGolfBallConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    let x = clickX, y = clickY;
+    if (!x && !y){
+      const rect = box.getBoundingClientRect();
+      x = rect.left + rect.width / 2;
+      y = rect.top + rect.height / 2;
+    }
+    spawnGolfBallConfetti(x, y);
     box.remove();
   }).catch(() => {
       box.innerHTML = `<div style="color:var(--danger);font-size:12px;">That slot was just taken — pick another.</div>`;
