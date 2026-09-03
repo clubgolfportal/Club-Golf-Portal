@@ -298,6 +298,23 @@
   .modal-body p:last-child{margin-bottom:0;}
   .modal-body strong{font-weight:600;}
 
+  .confetti-ball{
+    position:fixed; z-index:200; pointer-events:none; border-radius:50%;
+    background-image:
+      radial-gradient(circle at 32% 28%, #ffffff 0%, #f2f2ee 55%, #d8d8d1 100%),
+      radial-gradient(circle, rgba(0,0,0,.10) 1px, transparent 1.3px);
+    background-size: 100% 100%, 3px 3px;
+    box-shadow: inset -1px -1px 1px rgba(0,0,0,.18), 0 1px 2px rgba(0,0,0,.25);
+    animation-name: confetti-arc;
+    animation-timing-function: ease-out;
+    animation-fill-mode: forwards;
+  }
+  @keyframes confetti-arc{
+    0%{ transform:translate(-50%,-50%) translate(0,0) rotate(0deg); opacity:1; }
+    35%{ transform:translate(-50%,-50%) translate(var(--dx), var(--dy-up)) rotate(calc(var(--rot) * 0.4)); opacity:1; }
+    100%{ transform:translate(-50%,-50%) translate(var(--dx), var(--dy-down)) rotate(var(--rot)); opacity:0; }
+  }
+
   @media (max-width:560px){
     .countdown-banner{flex-direction:column; align-items:flex-start;}
     .countdown-value{gap:8px;}
@@ -1154,11 +1171,41 @@ function claimSlot(dateId, slotKey, box){
     agreedForfeit: true,
     attended: null,
     createdAt: firebase.firestore.FieldValue.serverTimestamp()
-  }).then(() => box.remove())
-    .catch(() => {
+  }).then(() => {
+    const rect = box.getBoundingClientRect();
+    spawnGolfBallConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    box.remove();
+  }).catch(() => {
       box.innerHTML = `<div style="color:var(--danger);font-size:12px;">That slot was just taken — pick another.</div>`;
       setTimeout(() => box.remove(), 2500);
     });
+}
+
+/* ---------------- CLAIM CONFETTI ---------------- */
+function spawnGolfBallConfetti(x, y){
+  const count = 20;
+  for (let i = 0; i < count; i++){
+    const ball = document.createElement("div");
+    ball.className = "confetti-ball";
+    const size = 8 + Math.random() * 6;
+    const dx = (Math.random() - 0.5) * 260;
+    const dyUp = -(110 + Math.random() * 150);
+    const dyDown = dyUp + 260 + Math.random() * 160;
+    const rot = (Math.random() * 720 - 360).toFixed(0) + "deg";
+    const duration = 900 + Math.random() * 500;
+    const delay = Math.random() * 80;
+    ball.style.left = x + "px";
+    ball.style.top = y + "px";
+    ball.style.width = ball.style.height = size + "px";
+    ball.style.setProperty("--dx", dx + "px");
+    ball.style.setProperty("--dy-up", dyUp + "px");
+    ball.style.setProperty("--dy-down", dyDown + "px");
+    ball.style.setProperty("--rot", rot);
+    ball.style.animationDuration = duration + "ms";
+    ball.style.animationDelay = delay + "ms";
+    document.body.appendChild(ball);
+    ball.addEventListener("animationend", () => ball.remove());
+  }
 }
 
 function cancelSignup(docId){
