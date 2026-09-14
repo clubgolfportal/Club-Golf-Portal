@@ -1,0 +1,15 @@
+// LOCAL EMULATOR RULES ONLY.
+// These are intentionally permissive (any signed-in user can read/write) so the
+// staging environment lets you click through every feature, including admin-only
+// ones, without needing to recreate the exact production rule set here. This file
+// is never deployed — it only configures the local Firestore emulator started via
+// `firebase emulators:start`. Your real production rules live in the Firebase console
+// and are untouched by this file.
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

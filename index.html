@@ -179,6 +179,20 @@
   .checkin-link:hover{text-decoration:underline;}
   .checkin-hint{font-size:12px; color:var(--ink-muted);}
 
+  .checkin-clicks-admin{
+    display:flex; align-items:center; gap:8px; margin-top:10px; padding-top:10px;
+    border-top:1px dashed var(--border);
+  }
+  .checkin-clicks-count{font-size:11.5px; color:var(--ink-muted); font-weight:500;}
+  .checkin-clicks-list{margin-top:8px; display:flex; flex-direction:column;}
+  .checkin-click-row{
+    display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+    padding:4px 0; font-size:12px; border-bottom:1px solid var(--border);
+  }
+  .checkin-click-row:last-child{border-bottom:none;}
+  .checkin-click-name{font-weight:500;}
+  .checkin-click-meta{color:var(--ink-faint); font-family:var(--mono); font-size:10.5px; white-space:nowrap;}
+
   .ground-rules{
     margin:0 16px 14px; padding:12px 16px;
     background:var(--highlight-soft); border:1px solid var(--highlight);
@@ -489,6 +503,15 @@ const auth = firebase.auth();
 const db = firebase.firestore();
 const { jsPDF } = window.jspdf;
 
+// Local testing only: when served from the Firebase Hosting emulator (localhost),
+// point at the local Auth/Firestore emulators instead of production. This block
+// never runs on the real deployed site, since that's served from a different host.
+if (location.hostname === "localhost" || location.hostname === "127.0.0.1"){
+  auth.useEmulator("http://localhost:9099");
+  db.useEmulator("localhost", 8080);
+  console.log("Using local Firebase emulators — production data is untouched.");
+}
+
 const USF_DOMAIN = "@usf.edu";
 const DEFAULT_FOURSOME_COUNT = 3;
 
@@ -515,6 +538,8 @@ let teeDates = {};           // dateId -> {enabled, foursomeCount, foursomeTimes
 let signupsByDate = {};      // dateId -> { slotKey: {name,uid,attended,docId} }
 let groundRulesText = "";    // broadcast message shown on every tee sheet
 let selectedDates = new Set(); // dateIds selected in the admin panel for bulk actions
+let clicksByDate = {};       // dateId -> [{name,email,clickCount,lastClickedAt}] — who clicked the BullsConnect register/check-in link
+let allUsers = [];           // admin-only: [{uid,name,email}] for manually assigning a member to a slot
 
 function escapeHtml(str){ const d=document.createElement("div"); d.textContent=str; return d.innerHTML; }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
@@ -636,6 +661,11 @@ function normalizeTeeDate(data, id){
     checkinCode: data.checkinCode || "",
     postAt
   };
+}
+
+function formatClickTime(date){
+  if (!date) return "";
+  return date.toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
 }
 
 function buildSlotKeys(foursomeCount){
@@ -799,6 +829,44 @@ function startListeners(){
     if (input && document.activeElement !== input) input.value = groundRulesText;
     renderAll();
   });
+
+  if (isAdmin){
+    db.collection("users").onSnapshot(snap => {
+      allUsers = [];
+      snap.forEach(doc => allUsers.push({ uid: doc.id, name: doc.data().name, email: doc.data().email }));
+      renderAll();
+    }, () => {}); // silently ignore if the rules don't yet allow admins to list all users
+  }
+
+  db.collection("checkinClicks").onSnapshot(snap => {
+    clicksByDate = {};
+    snap.forEach(doc => {
+      const d = doc.data();
+      if (!clicksByDate[d.dateId]) clicksByDate[d.dateId] = [];
+      clicksByDate[d.dateId].push({
+        name: d.name,
+        email: d.email,
+        clickCount: d.clickCount || 1,
+        lastClickedAt: (d.lastClickedAt && d.lastClickedAt.toDate) ? d.lastClickedAt.toDate() : null
+      });
+    });
+    renderAll();
+  }, () => {}); // silently ignore if checkinClicks isn't readable yet (e.g. security rules not deployed)
+}
+
+// Records that the current member clicked the BullsConnect register/check-in link for a tee date.
+// One doc per (dateId, uid) so repeat clicks increment a counter instead of piling up rows.
+function logCheckinClick(dateId){
+  if (!currentUser || !currentProfile) return;
+  const docId = `${dateId}_${currentUser.uid}`;
+  db.collection("checkinClicks").doc(docId).set({
+    dateId,
+    uid: currentUser.uid,
+    name: currentProfile.name,
+    email: currentProfile.email || currentUser.email,
+    lastClickedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    clickCount: firebase.firestore.FieldValue.increment(1)
+  }, { merge: true }).catch(() => {});
 }
 
 /* ---------------- CREATE / QUICK ADD (admin) ---------------- */
@@ -945,6 +1013,7 @@ function buildDateCard(dateId, data, opts){
   const { adminMode, isPast } = opts;
   const { enabled, foursomeCount, foursomeTimes, foursomeTimeHistory, practiceStart, practiceEnd, checkinCode, postAt } = data;
   const slots = signupsByDate[dateId] || {};
+  const clickList = (clicksByDate[dateId] || []).slice().sort((a,b) => (b.lastClickedAt||0) - (a.lastClickedAt||0));
   const { month, day, weekday } = formatDateParts(dateId);
   const slotKeys = buildSlotKeys(foursomeCount);
 
@@ -1031,6 +1100,18 @@ function buildDateCard(dateId, data, opts){
   }
 
   const earliestTime = foursomeTimes[0] || "3:00 PM";
+  const clicksAdminHtml = (adminMode && checkinCode)
+    ? `<div class="checkin-clicks-admin">
+        <span class="checkin-clicks-count">${clickList.length} member${clickList.length===1?"":"s"} clicked the register link</span>
+        ${clickList.length ? `<button class="btn btn-ghost btn-xs toggle-clicks-btn" data-date="${dateId}">View</button>` : ""}
+      </div>
+      <div class="checkin-clicks-list hidden" id="clicks-${dateId}">
+        ${clickList.map(c => `<div class="checkin-click-row">
+            <span class="checkin-click-name">${escapeHtml(c.name || c.email || "Unknown")}</span>
+            <span class="checkin-click-meta">${escapeHtml(c.email || "")} · ${c.clickCount}× · last ${formatClickTime(c.lastClickedAt)}</span>
+          </div>`).join("")}
+      </div>`
+    : "";
   const checkinHtml = checkinCode
     ? `<div class="checkin-box">
         <div class="checkin-label">Check in with BullsConnect</div>
@@ -1041,6 +1122,7 @@ function buildDateCard(dateId, data, opts){
             <span class="checkin-hint">or scan a friend's QR code to check in</span>
           </div>
         </div>
+        ${clicksAdminHtml}
       </div>`
     : "";
   const groundRulesHtml = groundRulesText
@@ -1080,10 +1162,23 @@ function buildDateCard(dateId, data, opts){
     if (qrContainer && window.QRCode){
       new QRCode(qrContainer, { text: checkinCode, width:140, height:140, correctLevel: QRCode.CorrectLevel.M });
     }
+    const checkinLinkEl = div.querySelector(".checkin-link");
+    if (checkinLinkEl) checkinLinkEl.addEventListener("click", () => logCheckinClick(dateId));
+    const toggleClicksBtn = div.querySelector(".toggle-clicks-btn");
+    if (toggleClicksBtn) toggleClicksBtn.onclick = () => {
+      const list = div.querySelector(`#clicks-${dateId}`);
+      const nowHidden = list.classList.toggle("hidden");
+      toggleClicksBtn.textContent = nowHidden ? "View" : "Hide";
+    };
   }
 
   div.querySelectorAll(".claim-btn").forEach(btn => {
     btn.onclick = () => openClaimConfirm(btn, dateId, btn.dataset.slot);
+  });
+  div.querySelectorAll(".admin-assign-btn").forEach(btn => {
+    const takenUids = new Set(Object.values(slots).map(s => s.uid).filter(Boolean));
+    const availableUsers = allUsers.filter(u => !takenUids.has(u.uid)).sort((a,b) => (a.name||"").localeCompare(b.name||""));
+    btn.onclick = () => openAdminAssign(btn, dateId, btn.dataset.slot, availableUsers);
   });
   div.querySelectorAll(".cancel-btn").forEach(btn => {
     btn.onclick = () => cancelSignup(slots[btn.dataset.slot].docId);
@@ -1134,7 +1229,9 @@ function renderSlot(dateId, slotKey, occupant, mySignupSlot, isPast, isAlt, admi
     </div>`;
   } else {
     const label = "Open";
-    const btn = (canClaimGeneric && !adminMode) ? `<button class="btn btn-secondary btn-sm claim-btn" data-slot="${slotKey}">Claim</button>` : "";
+    let btn = "";
+    if (canClaimGeneric && !adminMode) btn = `<button class="btn btn-secondary btn-sm claim-btn" data-slot="${slotKey}">Claim</button>`;
+    else if (adminMode && !isPast) btn = `<button class="btn btn-secondary btn-sm admin-assign-btn" data-slot="${slotKey}">+ Add member</button>`;
     const disabledNote = (!canClaimGeneric && !isPast && mySignupSlot && !adminMode) ? '<span class="roster-note">already signed up</span>' : "";
     return `<div class="roster-row" id="slot-${dateId}-${slotKey}">
       <div class="roster-row-main"><span class="roster-index">${idxLabel}</span><span class="roster-empty">${label}</span></div>
@@ -1183,6 +1280,69 @@ function claimSlot(dateId, slotKey, box, clickX, clickY){
   }).catch(() => {
       box.innerHTML = `<div style="color:var(--danger);font-size:12px;">That slot was just taken — pick another.</div>`;
       setTimeout(() => box.remove(), 2500);
+    });
+}
+
+/* ---------------- ADMIN MANUAL ASSIGN ---------------- */
+// Lets an admin put a member into an open slot on their behalf (e.g. they signed up in person).
+function openAdminAssign(btn, dateId, slotKey, availableUsers){
+  const parent = btn.closest(".roster-row");
+  if (parent.querySelector(".assign-box")) return;
+  const box = document.createElement("div");
+  box.className = "confirm-box assign-box";
+  const options = availableUsers.map(u => `<option value="${escapeHtml(u.uid)}">${escapeHtml(u.name || u.email || u.uid)}</option>`).join("");
+  box.innerHTML = `
+    <label style="display:block;">
+      <select class="input input-sm assign-select" style="width:100%;">
+        <option value="">Select a member…</option>
+        ${options}
+        <option value="__other__">Guest / no account (type a name)</option>
+      </select>
+    </label>
+    <input type="text" class="input input-sm assign-name-input hidden" placeholder="Full name" style="width:100%;margin-top:8px;">
+    <div class="row-btns" style="margin-top:9px;">
+      <button class="btn btn-primary btn-sm yes" disabled>Add to slot</button>
+      <button class="btn btn-ghost btn-sm no">Cancel</button>
+    </div>`;
+  parent.appendChild(box);
+  const select = box.querySelector(".assign-select");
+  const nameInput = box.querySelector(".assign-name-input");
+  const yesBtn = box.querySelector(".yes");
+  const updateYesState = () => {
+    if (select.value === "__other__") yesBtn.disabled = !nameInput.value.trim();
+    else yesBtn.disabled = !select.value;
+  };
+  select.onchange = () => {
+    nameInput.classList.toggle("hidden", select.value !== "__other__");
+    updateYesState();
+  };
+  nameInput.oninput = updateYesState;
+  box.querySelector(".no").onclick = () => box.remove();
+  yesBtn.onclick = () => {
+    if (select.value === "__other__"){
+      adminAssignSlot(dateId, slotKey, null, nameInput.value.trim(), box);
+    } else {
+      const user = availableUsers.find(u => u.uid === select.value);
+      if (user) adminAssignSlot(dateId, slotKey, user.uid, user.name || user.email, box);
+    }
+  };
+}
+
+function adminAssignSlot(dateId, slotKey, uid, name, box){
+  const docId = `${dateId}_${slotKey}`;
+  const payload = {
+    dateId, slotKey, name,
+    agreedForfeit: true,
+    attended: null,
+    assignedByAdmin: true,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+  if (uid) payload.uid = uid;
+  db.collection("signups").doc(docId).set(payload)
+    .then(() => box.remove())
+    .catch(err => {
+      box.innerHTML = `<div style="color:var(--danger);font-size:12px;">Could not add member: ${escapeHtml(err.message)}</div>`;
+      setTimeout(() => box.remove(), 3000);
     });
 }
 
