@@ -1,15 +1,90 @@
-// LOCAL EMULATOR RULES ONLY.
-// These are intentionally permissive (any signed-in user can read/write) so the
-// staging environment lets you click through every feature, including admin-only
-// ones, without needing to recreate the exact production rule set here. This file
-// is never deployed — it only configures the local Firestore emulator started via
-// `firebase emulators:start`. Your real production rules live in the Firebase console
-// and are untouched by this file.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if request.auth != null;
+
+    function isUSF() {
+      return request.auth != null
+        && request.auth.token.email.matches('.*@usf[.]edu$');
+    }
+    function isAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    // Alternate-promotion helpers: let a cancelling member's write also stand in for
+    // whoever currently occupies alt1/alt2, verified against Firestore's own current
+    // state (never trusting the client's claim), so a slot can auto-fill the moment
+    // someone drops out without needing an admin online to do it.
+    function altSlotExists(dateId, altKey) {
+      return exists(/databases/$(database)/documents/signups/$(dateId + '_' + altKey));
+    }
+    // Requires the incoming doc to match the CURRENT alt occupant on both name and uid
+    // (including uid being absent on both sides, for a guest with no account) — matching
+    // name alone isn't enough, since anyone can see the roster and could otherwise claim
+    // a slot under a real alternate's name while tying it to their own uid.
+    function altSlotMatches(data, dateId, altKey) {
+      let alt = get(/databases/$(database)/documents/signups/$(dateId + '_' + altKey)).data;
+      return data.name == alt.name
+        && data.keys().hasAll(['uid']) == alt.keys().hasAll(['uid'])
+        && (!data.keys().hasAll(['uid']) || data.uid == alt.uid);
+    }
+    function isAltPromotion(data) {
+      return data.slotKey.matches('^(f[0-9]+p[0-9]+|alt1)$')
+        && (
+          (altSlotExists(data.dateId, 'alt1') && altSlotMatches(data, data.dateId, 'alt1'))
+          || (altSlotExists(data.dateId, 'alt2') && altSlotMatches(data, data.dateId, 'alt2'))
+        );
+    }
+
+    match /users/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isAdmin());
+      allow create: if isUSF() && request.auth.uid == uid;
+      allow update: if isUSF() && request.auth.uid == uid;
+    }
+
+    match /teeDates/{dateId} {
+      allow read: if isUSF();
+      allow create: if isAdmin();
+      allow update: if isAdmin() ||
+        (isUSF() &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['enabled']) &&
+         request.resource.data.enabled == true &&
+         resource.data.enabled == false &&
+         resource.data.keys().hasAny(['postAt']) &&
+         resource.data.postAt <= request.time);
+      allow delete: if isAdmin();
+    }
+
+    match /signups/{signupId} {
+      allow read: if isUSF();
+      allow list: if isUSF();
+      allow create: if isUSF()
+                    && request.resource.data.name is string
+                    && request.resource.data.agreedForfeit == true
+                    && (
+                      isAdmin()
+                      || request.resource.data.uid == request.auth.uid
+                      || isAltPromotion(request.resource.data)
+                    );
+      allow update: if isAdmin();
+      allow delete: if isAdmin() ||
+                    (isUSF() && resource.data.uid == request.auth.uid) ||
+                    (isUSF() && resource.data.slotKey in ['alt1', 'alt2']);
+    }
+
+    match /admins/{uid} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    match /settings/{docId} {
+      allow read: if isUSF();
+      allow write: if isAdmin();
+    }
+
+    match /checkinClicks/{clickId} {
+      allow read: if isAdmin();
+      allow create, update: if isUSF()
+                    && request.resource.data.uid == request.auth.uid;
     }
   }
 }

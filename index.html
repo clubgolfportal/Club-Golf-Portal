@@ -256,6 +256,10 @@
   .roster-note{font-size:11px; color:var(--ink-faint);}
   .roster-row-actions{display:flex; align-items:center; gap:10px; flex-shrink:0;}
   .roster-row.is-mine{background:var(--accent-soft); margin:0 -8px; padding:6px 8px; border-radius:4px;}
+  .roster-row[draggable="true"]{cursor:grab;}
+  .roster-row.dragging{opacity:.4;}
+  .roster-row.drag-over{background:var(--accent-soft); outline:2px dashed var(--accent); outline-offset:-2px; border-radius:4px;}
+  .drag-handle{color:var(--ink-faint); font-size:12px; cursor:grab; user-select:none;}
 
   .attend-check{display:flex; align-items:center; gap:5px; font-size:11.5px; color:var(--ink-muted);}
 
@@ -1181,10 +1185,10 @@ function buildDateCard(dateId, data, opts){
     btn.onclick = () => openAdminAssign(btn, dateId, btn.dataset.slot, availableUsers);
   });
   div.querySelectorAll(".cancel-btn").forEach(btn => {
-    btn.onclick = () => cancelSignup(slots[btn.dataset.slot].docId);
+    btn.onclick = () => cancelSignup(dateId, btn.dataset.slot, slots[btn.dataset.slot].docId, slots);
   });
   div.querySelectorAll(".remove-btn").forEach(btn => {
-    btn.onclick = () => cancelSignup(btn.dataset.docid);
+    btn.onclick = () => cancelSignup(dateId, btn.dataset.slot, btn.dataset.docid, slots);
   });
   div.querySelectorAll(".attend-check input").forEach(chk => {
     chk.onchange = () => db.collection("signups").doc(chk.dataset.docid).update({ attended: chk.checked });
@@ -1210,11 +1214,74 @@ function buildDateCard(dateId, data, opts){
     renderBulkBar();
   };
 
+  if (adminMode && !isPast){
+    div.querySelectorAll(".roster-row").forEach(row => {
+      const rowKey = row.dataset.slotkey;
+      row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("drag-over"); });
+      row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+      row.addEventListener("drop", (e) => {
+        e.preventDefault();
+        row.classList.remove("drag-over");
+        const sourceKey = e.dataTransfer.getData("text/plain");
+        if (!sourceKey || sourceKey === rowKey) return;
+        moveOrSwapSlot(dateId, sourceKey, rowKey, slots);
+      });
+      if (row.draggable){
+        row.addEventListener("dragstart", (e) => {
+          e.dataTransfer.setData("text/plain", rowKey);
+          e.dataTransfer.effectAllowed = "move";
+          row.classList.add("dragging");
+        });
+        row.addEventListener("dragend", () => row.classList.remove("dragging"));
+      }
+    });
+  }
+
   return div;
+}
+
+// Moves an occupant from one slot to another (admin drag-and-drop). Dropping onto an
+// open slot moves them; dropping onto an occupied slot swaps the two occupants.
+// Keeps each signups doc's id/slotKey in sync so future claims never collide with it.
+function moveOrSwapSlot(dateId, sourceKey, targetKey, slots){
+  const sourceOcc = slots[sourceKey];
+  if (!sourceOcc) return;
+  const targetOcc = slots[targetKey];
+  const batch = db.batch();
+  const sourceRef = db.collection("signups").doc(sourceOcc.docId);
+
+  if (targetOcc){
+    const targetRef = db.collection("signups").doc(targetOcc.docId);
+    batch.update(sourceRef, {
+      name: targetOcc.name,
+      attended: targetOcc.attended ?? null,
+      uid: targetOcc.uid || firebase.firestore.FieldValue.delete()
+    });
+    batch.update(targetRef, {
+      name: sourceOcc.name,
+      attended: sourceOcc.attended ?? null,
+      uid: sourceOcc.uid || firebase.firestore.FieldValue.delete()
+    });
+  } else {
+    const newRef = db.collection("signups").doc(`${dateId}_${targetKey}`);
+    const payload = {
+      dateId, slotKey: targetKey,
+      name: sourceOcc.name,
+      attended: sourceOcc.attended ?? null,
+      agreedForfeit: true,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if (sourceOcc.uid) payload.uid = sourceOcc.uid;
+    batch.set(newRef, payload);
+    batch.delete(sourceRef);
+  }
+
+  batch.commit().catch(err => alert("Could not move: " + err.message));
 }
 
 function renderSlot(dateId, slotKey, occupant, mySignupSlot, isPast, isAlt, adminMode, idxLabel){
   const canClaimGeneric = !occupant && !isPast && !mySignupSlot;
+  const draggableAdmin = adminMode && !isPast;
   if (occupant){
     const mine = occupant.uid === currentUser.uid;
     const attendCheckbox = adminMode
@@ -1222,9 +1289,10 @@ function renderSlot(dateId, slotKey, occupant, mySignupSlot, isPast, isAlt, admi
       : "";
     const actionBtn = mine
       ? `<button class="btn btn-ghost btn-sm cancel-btn" data-slot="${slotKey}">Cancel</button>`
-      : (adminMode ? `<button class="btn btn-ghost btn-sm remove-btn" data-docid="${occupant.docId}">Remove</button>` : "");
-    return `<div class="roster-row ${mine?'is-mine':''}" id="slot-${dateId}-${slotKey}">
-      <div class="roster-row-main"><span class="roster-index">${idxLabel}</span><span class="roster-name">${escapeHtml(occupant.name)}</span></div>
+      : (adminMode ? `<button class="btn btn-ghost btn-sm remove-btn" data-docid="${occupant.docId}" data-slot="${slotKey}">Remove</button>` : "");
+    const dragHandle = draggableAdmin ? '<span class="drag-handle" title="Drag to move to another slot">⠿</span>' : "";
+    return `<div class="roster-row ${mine?'is-mine':''}" id="slot-${dateId}-${slotKey}" data-slotkey="${slotKey}" ${draggableAdmin ? 'draggable="true"' : ""}>
+      <div class="roster-row-main">${dragHandle}<span class="roster-index">${idxLabel}</span><span class="roster-name">${escapeHtml(occupant.name)}</span></div>
       <div class="roster-row-actions">${attendCheckbox}${actionBtn}</div>
     </div>`;
   } else {
@@ -1233,7 +1301,7 @@ function renderSlot(dateId, slotKey, occupant, mySignupSlot, isPast, isAlt, admi
     if (canClaimGeneric && !adminMode) btn = `<button class="btn btn-secondary btn-sm claim-btn" data-slot="${slotKey}">Claim</button>`;
     else if (adminMode && !isPast) btn = `<button class="btn btn-secondary btn-sm admin-assign-btn" data-slot="${slotKey}">+ Add member</button>`;
     const disabledNote = (!canClaimGeneric && !isPast && mySignupSlot && !adminMode) ? '<span class="roster-note">already signed up</span>' : "";
-    return `<div class="roster-row" id="slot-${dateId}-${slotKey}">
+    return `<div class="roster-row" id="slot-${dateId}-${slotKey}" data-slotkey="${slotKey}">
       <div class="roster-row-main"><span class="roster-index">${idxLabel}</span><span class="roster-empty">${label}</span></div>
       <div class="roster-row-actions">${btn || disabledNote}</div>
     </div>`;
@@ -1373,9 +1441,35 @@ function spawnGolfBallConfetti(x, y){
   }
 }
 
-function cancelSignup(docId){
+// Cancelling/removing a foursome slot automatically pulls the next alternate into it,
+// then shifts any remaining alternates up so there's never a gap ahead of a filled one.
+// Each move runs as its own sequential delete-then-create step (never batched together),
+// for two reasons: (1) Firestore treats a same-path delete+recreate inside one batch as an
+// update rather than a create, which only admins may do; (2) the security rule verifies a
+// promotion by checking the source alt doc still exists at that moment, so an alt slot must
+// not be deleted until *after* its occupant has been copied into their new slot.
+function cancelSignup(dateId, slotKey, docId, slots){
   if (!docId) return;
-  db.collection("signups").doc(docId).delete();
+  const isMainSlot = dateId && slotKey && slots && /^f\d+p\d+$/.test(slotKey);
+  const altOccupants = isMainSlot ? ALT_KEYS.map(k => slots[k]).filter(Boolean) : [];
+  const targets = altOccupants.length ? [slotKey, ...ALT_KEYS.slice(0, altOccupants.length - 1)] : [];
+
+  let chain = db.collection("signups").doc(docId).delete();
+  altOccupants.forEach((occ, i) => {
+    const targetKey = targets[i];
+    const payload = {
+      dateId, slotKey: targetKey,
+      name: occ.name,
+      attended: occ.attended ?? null,
+      agreedForfeit: true,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    };
+    if (occ.uid) payload.uid = occ.uid;
+    chain = chain
+      .then(() => db.collection("signups").doc(`${dateId}_${targetKey}`).set(payload))
+      .then(() => db.collection("signups").doc(occ.docId).delete());
+  });
+  chain.catch(err => alert("Could not cancel: " + err.message));
 }
 
 function saveSheetChanges(dateId, oldCount, oldTimes, oldHistory){
