@@ -1205,7 +1205,7 @@ function buildDateCard(dateId, data, opts){
       });
   };
   const pdfBtn = div.querySelector(".pdf-btn");
-  if (pdfBtn) pdfBtn.onclick = () => downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTimes, slots, practiceStart, practiceEnd);
+  if (pdfBtn) pdfBtn.onclick = () => downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTimes, slots, practiceStart, practiceEnd, checkinCode);
   const deleteBtn = div.querySelector(".delete-sheet-btn");
   if (deleteBtn) deleteBtn.onclick = () => deleteTeeSheet(dateId);
   const bulkChk = div.querySelector(".bulk-select-chk");
@@ -1533,7 +1533,7 @@ function deleteTeeSheet(dateId){
   });
 }
 
-function downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTimes, slots, practiceStart, practiceEnd){
+function downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTimes, slots, practiceStart, practiceEnd, checkinCode){
   const doc = new jsPDF();
   const slotKeys = buildSlotKeys(foursomeCount);
   doc.setFontSize(16);
@@ -1542,6 +1542,25 @@ function downloadTeeSheet(dateId, month, day, weekday, foursomeCount, foursomeTi
   doc.text(`${weekday}, ${month} ${day}`, 14, 26);
   doc.text(`Practice: ${practiceStart} – ${practiceEnd}`, 14, 32);
   doc.text("Heritage Isles Golf & Country Club", 14, 38);
+
+  if (checkinCode && window.QRCode){
+    const qrSize = 55; // mm — large enough to scan reliably off a printed page
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const qrX = pageWidth - qrSize - 14;
+    const qrY = 45;
+    const qrDiv = document.createElement("div");
+    qrDiv.style.position = "fixed";
+    qrDiv.style.left = "-9999px";
+    document.body.appendChild(qrDiv);
+    new QRCode(qrDiv, { text: checkinCode, width: 400, height: 400, correctLevel: QRCode.CorrectLevel.M });
+    const canvas = qrDiv.querySelector("canvas");
+    if (canvas){
+      doc.addImage(canvas.toDataURL("image/png"), "PNG", qrX, qrY, qrSize, qrSize);
+      doc.setFontSize(9);
+      doc.text("Scan to check in via BullsConnect", qrX, qrY + qrSize + 5);
+    }
+    document.body.removeChild(qrDiv);
+  }
 
   let y = 50;
   for (let i=1; i<=foursomeCount; i++){
